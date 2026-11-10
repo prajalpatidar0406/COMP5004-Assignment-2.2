@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from numcompute.utils import (
+from numcompute_stream.utils import (
     batches,
     cosine_similarity,
     euclidean_distance,
@@ -94,3 +94,29 @@ def test_batches_reject_nonpositive_size():
         list(batches([1, 2], 0))
     with pytest.raises(ValueError, match="at least one dimension"):
         list(batches(1, 1))
+
+def test_distances_do_not_overflow_or_underflow_at_float_extremes():
+    import math
+
+    assert euclidean_distance([3e200], [-1e200]) == pytest.approx(4e200)
+    assert euclidean_distance([3e-200, 0.0], [0.0, 4e-200]) == pytest.approx(5e-200)
+    assert manhattan_distance([1e308], [-1e307]) == pytest.approx(1.1e308)
+    big = [1e300, -2e300, 3e300]
+    assert euclidean_distance(big, [0, 0, 0]) == pytest.approx(math.dist(big, [0, 0, 0]))
+
+
+def test_distance_beyond_float_range_is_infinite_not_nan():
+    assert euclidean_distance([1e308], [-1e308]) == float("inf")
+
+
+def test_cosine_similarity_is_stable_for_extreme_magnitudes():
+    assert cosine_similarity([1e300, 1e300], [2e300, 2e300]) == pytest.approx(1.0)
+    assert cosine_similarity([1e-300, 0.0], [1e-300, 1e-300]) == pytest.approx(2**-0.5)
+    assert -1.0 <= cosine_similarity([1, 2, 3], [-1, -2, -3]) <= 1.0
+
+
+def test_distances_reject_non_finite_input():
+    with pytest.raises(ValueError, match="NaN or infinity"):
+        euclidean_distance([np.nan], [0.0])
+    with pytest.raises(ValueError, match="NaN or infinity"):
+        cosine_similarity([np.inf], [1.0])
