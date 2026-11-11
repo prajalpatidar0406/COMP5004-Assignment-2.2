@@ -3,8 +3,9 @@
 import numpy as np
 import pytest
 
-from numcompute.pipeline import Compose, FeatureUnion, Pipeline
-from numcompute.preprocessing import Imputer, OneHotEncoder, StandardScaler
+from numcompute_stream.pipeline import Compose, FeatureUnion, Pipeline
+from numcompute_stream.preprocessing import ColumnSelector, Imputer, OneHotEncoder, StandardScaler
+from numcompute_stream.tree import DecisionTreeClassifier
 
 
 def test_pipeline_fit_transform_chains_transformers():
@@ -194,3 +195,167 @@ def test_pipeline_rejects_invalid_transformer_and_estimator_components():
 
     with pytest.raises(TypeError, match="fit and predict"):
         Pipeline([("model", PredictOnly())]).fit([[1.0]], [0])
+
+# Streaming (partial_fit) behaviour
+
+
+def test_pipeline_partial_fit_uses_tree_buffering_not_refitting():
+    tree = DecisionTreeClassifier(buffer_size=4)
+    pipeline = Pipeline([("scale", StandardScaler()), ("model", tree)])
+    pipeline.partial_fit([[0.0], [1.0]], [0, 0])
+    assert tree.buffered_samples == 2 and not tree.is_fitted
+    assert not pipeline.is_fitted
+    pipeline.partial_fit([[2.0], [3.0]], [1, 1])
+    assert tree.retrain_count_ == 1 and pipeline.is_fitted
+    np.testing.assert_array_equal(pipeline.predict([[0.0], [3.0]]), [0, 1])
+
+
+def test_pipeline_partial_fit_scaler_statistics_equal_batch():
+    data = np.random.default_rng(1).normal(size=(90, 2)) * [1, 50]
+    streamed = Pipeline([("scale", StandardScaler())])
+    for chunk in np.array_split(data, 6):
+        streamed.partial_fit(chunk)
+    batch = Pipeline([("scale", StandardScaler())]).fit(data)
+    np.testing.assert_allclose(streamed.transform(data), batch.transform(data))
+
+
+def test_pipeline_partial_fit_continues_from_batch_fit():
+    pipeline = Pipeline([("scale", StandardScaler())]).fit([[0.0], [2.0]])
+    pipeline.partial_fit([[4.0], [6.0]])
+    assert pipeline.named_steps["scale"].mean_ == pytest.approx(3.0)
+
+
+def test_pipeline_handles_incremental_category_expansion_with_tree():
+    pipeline = Pipeline(
+        [("encode", OneHotEncoder()), ("model", DecisionTreeClassifier(buffer_size=4))]
+    )
+    pipeline.partial_fit([["a"], ["b"]], [0, 0])
+    pipeline.partial_fit([["c"], ["c"]], [1, 1])
+    np.testing.assert_array_equal(pipeline.predict([["a"], ["c"]]), [0, 1])
+
+
+def test_pipeline_appends_grown_columns_without_shifting_existing_ones():
+    pipeline = Pipeline([("encode", OneHotEncoder())])
+    first = pipeline.partial_fit([["a", "x"], ["b", "y"]]).transform([["a", "x"]])
+    pipeline.partial_fit([["c", "x"]])  # feature 0 gains category "c"
+    after = pipeline.transform([["a", "x"], ["c", "x"]])
+    np.testing.assert_array_equal(after[:1, : first.shape[1]], first)
+    np.testing.assert_array_equal(after[1], [0, 0, 1, 0, 1])  # "c" column is last
+
+
+def test_pipeline_category_expansion_does_not_break_an_already_fitted_tree():
+    pipeline = Pipeline(
+        [("encode", OneHotEncoder()), ("model", DecisionTreeClassifier(buffer_size=2))]
+    )
+    pipeline.partial_fit([["a"], ["b"]], [0, 1])
+    assert pipeline.named_steps["model"].is_fitted
+    pipeline.partial_fit([["c"]], [1])
+    assert pipeline.predict([["a"], ["c"]]).shape == (2,)
+
+
+def test_pipeline_new_feature_columns_get_fresh_transformers():
+    pipeline = Pipeline([("encode", OneHotEncoder()), ("scale", StandardScaler())])
+    pipeline.partial_fit([["a"], ["a"]])
+    pipeline.partial_fit([["b"], ["b"]])  # creates a second scaled column
+    scalers = pipeline._columnwise["scale"].transformers
+    assert len(scalers) == 2
+    assert scalers[1].n_samples_seen_ == 2  # did not inherit column 0's state
+
+
+def test_pipeline_predict_proba_and_classes_pass_through():
+    pipeline = Pipeline([("scale", StandardScaler()), ("tree", DecisionTreeClassifier())])
+    pipeline.fit([[0.0], [1.0], [2.0], [3.0]], [0, 0, 1, 1])
+    np.testing.assert_array_equal(pipeline.classes_, [0, 1])
+    np.testing.assert_allclose(pipeline.predict_proba([[0.0], [3.0]]), [[1, 0], [0, 1]])
+
+
+def test_feature_union_with_column_selectors_streams_mixed_tables():
+    features = FeatureUnion(
+        [
+            ("numeric", Pipeline([("pick", ColumnSelector([0], dtype=float)), ("impute", Imputer())])),
+            ("category", Pipeline([("pick", ColumnSelector([1])), ("encode", OneHotEncoder())])),
+        ]
+    )
+    pipeline = Pipeline([("features", features), ("tree", DecisionTreeClassifier(buffer_size=4))])
+    pipeline.partial_fit(np.array([[1.0, "a"], [np.nan, "b"]], dtype=object), [0, 1])
+    pipeline.partial_fit(np.array([[3.0, "a"], [4.0, "b"]], dtype=object), [0, 1])
+    np.testing.assert_array_equal(
+        pipeline.predict(np.array([[2.0, "a"], [2.0, "b"]], dtype=object)), [0, 1]
+    )
+
+
+def test_pipeline_partial_fit_requires_targets_for_estimator():
+    pipeline = Pipeline([("tree", DecisionTreeClassifier())])
+    with pytest.raises(ValueError, match="y is required"):
+        pipeline.partial_fit([[0]])
+
+
+@pytest.mark.parametrize(
+    ("X", "y", "message"),
+    [
+        (np.empty((0, 1)), [], "must not be empty"),
+        (np.zeros((2, 1, 1)), [0, 1], "1D or 2D"),
+        ([[0], [1]], [0], "match the number"),
+    ],
+)
+def test_pipeline_partial_fit_rejects_invalid_chunks(X, y, message):
+    pipeline = Pipeline([("tree", DecisionTreeClassifier())])
+    with pytest.raises(ValueError, match=message):
+        pipeline.partial_fit(X, y)
+
+
+def test_compose_updates_transformers_incrementally():
+    class IncrementalOffset:
+        def partial_fit(self, X):
+            self.seen = getattr(self, "seen", 0) + len(X)
+            return self
+
+        def fit(self, X):
+            self.seen = len(X)
+            return self
+
+        def transform(self, X):
+            return np.asarray(X) + self.seen
+
+    transformer = IncrementalOffset()
+    compose = Compose([("offset", transformer)])
+    compose.partial_fit([1, 2])
+    compose.partial_fit([3])
+    assert transformer.seen == 3
+
+
+def test_compose_fits_non_streaming_steps_only_once():
+    class CountingFit:
+        fits = 0
+
+        def fit(self, X):
+            CountingFit.fits += 1
+            return self
+
+        def transform(self, X):
+            return X
+
+    compose = Compose([("count", CountingFit())])
+    compose.partial_fit([1])
+    compose.partial_fit([2])
+    assert CountingFit.fits == 1
+
+
+def test_feature_union_updates_each_branch_incrementally():
+    class IncrementalIdentity:
+        def partial_fit(self, X):
+            self.calls = getattr(self, "calls", 0) + 1
+            return self
+
+        def fit(self, X):
+            return self
+
+        def transform(self, X):
+            return np.asarray(X).reshape(-1, 1)
+
+    first = IncrementalIdentity()
+    second = IncrementalIdentity()
+    union = FeatureUnion([("first", first), ("second", second)])
+    union.partial_fit([[1], [2]])
+    union.partial_fit([[3]])
+    assert first.calls == second.calls == 2
