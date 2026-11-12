@@ -2,7 +2,8 @@
 
 import numpy as np
 import pytest
-from numcompute.sort_search import (
+from numcompute_stream.sort_search import (
+    StreamingTopK,
     stable_sort,
     multi_key_sort,
     topk,
@@ -220,3 +221,69 @@ def test_sort_search_non_contiguous_and_invalid_dimensions():
         quickselect(arr_2d, k=1)
     with pytest.raises(ValueError):
         binary_search(arr_2d, 2)
+
+
+# Streaming top-k
+
+
+@pytest.mark.parametrize("largest", [True, False])
+@pytest.mark.parametrize("n_chunks", [1, 3, 17])
+def test_streaming_topk_equals_batch_topk(largest, n_chunks):
+    values = np.random.default_rng(n_chunks).normal(size=300)
+    stream = StreamingTopK(k=7, largest=largest)
+    for chunk in np.array_split(values, n_chunks):
+        stream.update(chunk)
+    expected = np.sort(values)[::-1][:7] if largest else np.sort(values)[:7]
+    np.testing.assert_array_equal(stream.result(), expected)
+
+
+def test_streaming_topk_reports_stream_positions():
+    stream = StreamingTopK(k=2).update([5, 1, 9]).update([7, 3])
+    values, positions = stream.result(return_indices=True)
+    np.testing.assert_array_equal(values, [9, 7])
+    np.testing.assert_array_equal(positions, [2, 3])
+
+
+def test_streaming_topk_breaks_ties_by_earliest_position():
+    stream = StreamingTopK(k=2).update([4, 4]).update([4, 4])
+    np.testing.assert_array_equal(stream.result(return_indices=True)[1], [0, 1])
+
+
+def test_streaming_topk_returns_fewer_values_before_k_are_seen():
+    stream = StreamingTopK(k=5).update([3, 1])
+    np.testing.assert_array_equal(stream.result(), [3, 1])
+
+
+def test_streaming_topk_memory_stays_at_k():
+    stream = StreamingTopK(k=3)
+    for _ in range(50):
+        stream.update(np.random.default_rng(0).random(100))
+    assert stream._values.size == 3 and stream.n_seen_ == 5000
+
+
+def test_streaming_topk_nan_handling():
+    with pytest.raises(ValueError, match="skipna"):
+        StreamingTopK(k=1).update([1.0, np.nan])
+    stream = StreamingTopK(k=1, skipna=True).update([1.0, np.nan, 3.0])
+    np.testing.assert_array_equal(stream.result(return_indices=True)[1], [2])
+
+
+def test_streaming_topk_ignores_empty_chunks_and_resets():
+    stream = StreamingTopK(k=1).update([]).update([2])
+    assert stream.result()[0] == 2
+    stream.reset()
+    assert stream.result().size == 0 and stream.n_seen_ == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "values", "error", "message"),
+    [
+        ({"k": 0}, [1], ValueError, "positive integer"),
+        ({"k": True}, [1], ValueError, "positive integer"),
+        ({"k": 1}, [[1, 2]], ValueError, r"1D array. Received shape \(1, 2\)"),
+        ({"k": 1}, ["a"], TypeError, "real numeric"),
+    ],
+)
+def test_streaming_topk_rejects_invalid_input(kwargs, values, error, message):
+    with pytest.raises(error, match=message):
+        StreamingTopK(**kwargs).update(values)
