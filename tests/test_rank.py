@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from numcompute.rank import Ranker
+from numcompute_stream.rank import Ranker, StreamingRanker
 
 
 @pytest.fixture
@@ -168,3 +168,50 @@ def test_percentile_empty_array(ranker):
     with pytest.raises(ValueError) as exc:
         ranker.percentile([], 50)
     assert "empty" in str(exc.value)
+
+# Streaming ranker
+
+
+@pytest.mark.parametrize("interpolation", ["linear", "lower", "higher", "midpoint"])
+def test_streaming_percentile_equals_batch_percentile(interpolation):
+    values = np.random.default_rng(4).integers(0, 50, 101).astype(float)
+    ranker = StreamingRanker()
+    for chunk in np.array_split(values, 6):
+        ranker.partial_fit(chunk)
+    for q in (0, 10, 37.5, 50, 99, 100):
+        assert ranker.percentile(q, interpolation) == pytest.approx(
+            Ranker().percentile(values, q, interpolation)
+        )
+
+
+def test_streaming_percentile_rank_splits_ties_evenly():
+    ranker = StreamingRanker().partial_fit([1, 2, 2, 3])
+    np.testing.assert_allclose(ranker.percentile_rank([0, 2, 5]), [0.0, 50.0, 100.0])
+
+
+def test_streaming_ranker_keeps_reference_sorted_across_chunks():
+    ranker = StreamingRanker().partial_fit([5, 1]).update([3, 2, 4])
+    np.testing.assert_array_equal(ranker._sorted, [1, 2, 3, 4, 5])
+
+
+def test_streaming_ranker_counts_and_ignores_missing_values():
+    ranker = StreamingRanker().partial_fit([1.0, np.nan, "x", 3.0])
+    assert (ranker.n_seen_, ranker.n_missing_) == (4, 2)
+    assert ranker.percentile(50) == pytest.approx(2.0)
+    assert np.isnan(ranker.percentile_rank([np.nan])[0])
+
+
+def test_streaming_ranker_ignores_empty_chunks_and_needs_data():
+    ranker = StreamingRanker().partial_fit([])
+    with pytest.raises(ValueError, match="No valid values"):
+        ranker.percentile(50)
+    with pytest.raises(ValueError, match="No valid values"):
+        ranker.percentile_rank([1])
+
+
+def test_streaming_ranker_rejects_2d_chunks_and_resets():
+    with pytest.raises(ValueError, match="1D"):
+        StreamingRanker().partial_fit([[1, 2]])
+    ranker = StreamingRanker().partial_fit([1, 2])
+    ranker.reset()
+    assert ranker.n_seen_ == 0 and ranker._sorted.size == 0
