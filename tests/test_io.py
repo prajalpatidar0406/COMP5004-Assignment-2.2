@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from numcompute.io import iter_csv, load_csv
+from numcompute_stream.io import iter_csv, load_csv
 
 
 def test_load_csv_preserves_numeric_missing_values(tmp_path):
