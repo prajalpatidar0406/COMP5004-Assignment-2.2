@@ -1,7 +1,12 @@
+import numpy as np
 import pytest
 
-from numcompute.benchmarking import (
+from numcompute_stream.benchmarking import (
     benchmark,
+    benchmark_streaming_buffer_sizes,
+    benchmark_toolkit,
+    format_toolkit_table,
+    toolkit_workloads,
     compare,
     format_table,
     main,
@@ -88,3 +93,49 @@ def test_vectorization_benchmark_prints_comparison(capsys):
     assert "NumPy vectorised" in output
     assert "Environment:" in output
     assert "Median speedup:" in output
+
+def test_buffer_size_benchmark_reports_accuracy_and_retraining_time():
+    X = np.arange(20, dtype=float).reshape(-1, 1)
+    y = (X[:, 0] >= 10).astype(int)
+    results = benchmark_streaming_buffer_sizes(X, y, [2, 5], chunk_size=2, max_depth=2)
+    assert results[2]["retrain_count"] == 10
+    assert results[5]["retrain_count"] == 3
+    assert results[2]["accuracy"] is not None
+    assert results[2]["retraining_seconds"] >= 0
+    assert len(results[2]["chunk_accuracies"]) == 9  # all chunks but the first
+
+
+def test_buffer_size_benchmark_rejects_invalid_chunk_size():
+    with pytest.raises(ValueError, match="chunk_size"):
+        benchmark_streaming_buffer_sizes([[0]], [0], [1], chunk_size=0)
+
+
+def test_buffer_size_benchmark_rejects_empty_sizes():
+    with pytest.raises(ValueError, match="at least one"):
+        benchmark_streaming_buffer_sizes([[0]], [0], [], chunk_size=1)
+
+
+def test_toolkit_workloads_agree_with_their_references():
+    for workload in toolkit_workloads(size=500, seed=1):
+        workload["check"](workload["reference"](), workload["numcompute_stream"]())
+
+
+def test_benchmark_toolkit_reports_every_workload():
+    rows = benchmark_toolkit(size=500, repeats=1, warmup=0)
+    assert len(rows) == 6
+    assert all(row["reference_seconds"] > 0 and row["speedup"] > 0 for row in rows)
+    table = format_toolkit_table(rows)
+    assert table.count("\n") == len(rows) + 1
+    assert "Decision-tree best split" in table
+
+
+def test_toolkit_benchmark_rejects_tiny_sizes_and_empty_tables():
+    with pytest.raises(ValueError, match="at least 100"):
+        toolkit_workloads(size=10)
+    with pytest.raises(ValueError, match="at least one"):
+        format_toolkit_table([])
+
+
+def test_main_runs_toolkit_suite(capsys):
+    main(["--size", "500", "--repeats", "1", "--warmup", "0", "--suite", "toolkit"])
+    assert "Speed-up" in capsys.readouterr().out
