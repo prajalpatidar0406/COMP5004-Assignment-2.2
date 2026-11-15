@@ -3,16 +3,19 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "numcompute"
+name = "numcompute_stream"
 version = "0.1.0"
-description = "A NumPy-only educational numerical computing toolkit"
+description = "An educational numerical computing toolkit with streaming models"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "matplotlib>=3.7"]
 
 [tool.setuptools]
-package-dir = {numcompute = "NumCompute/numcompute"}
-packages = ["numcompute"]
+packages = ["numcompute", "numcompute_stream"]
+
+[tool.setuptools.package-dir]
+numcompute = "NumCompute/numcompute"
+numcompute_stream = "NumCompute/numcompute_stream"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
