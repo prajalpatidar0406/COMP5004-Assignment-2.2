@@ -1,12 +1,12 @@
-"""Behavior and edge-case tests for finite-difference derivatives."""
+"""Behaviour and edge cases for the finite-difference derivatives."""
 
 import numpy as np
 import pytest
 
-from numcompute.optim import grad, jacobian
+from numcompute_stream.optim import grad, jacobian
 
 
-# Scalar gradients should work for positive, negative, and zero-valued points.
+# Check scalar gradients at a negative point, at zero and at a positive point.
 @pytest.mark.parametrize(
     ("x", "expected"),
     [
@@ -22,7 +22,8 @@ def test_grad_central_difference_for_scalar_inputs(x: float, expected: float) ->
 
 
 def test_grad_uses_central_difference_by_default() -> None:
-    # A cubic has a noticeable forward-difference error, so this checks the default.
+    # A cubic has a noticeable forward-difference error, so the tight tolerance
+    # only passes if central differences are the default.
     derivative = grad(lambda value: value**3, 2.0)
 
     assert derivative == pytest.approx(12.0, abs=1e-8)
@@ -37,7 +38,8 @@ def test_grad_uses_central_difference_by_default() -> None:
     ],
 )
 def test_grad_forward_difference_for_scalar_inputs(x: float, expected: float) -> None:
-    # Forward differences have a small step-sized bias for a squared function.
+    # For x**2 the forward difference is exactly 2x + h, so the expected values
+    # include the 1e-5 step.
     derivative = grad(lambda value: value**2, x, method="forward")
 
     assert derivative == pytest.approx(expected, abs=1e-8)
@@ -153,7 +155,7 @@ def test_grad_rejects_methods_it_does_not_support(method: str | None) -> None:
         grad(lambda value: value**2, 1.0, method=method)
 
 
-# The Jacobian rows correspond to outputs; columns correspond to input values.
+# Jacobian rows are outputs and columns are inputs.
 def test_jacobian_matches_a_linear_function_matrix() -> None:
     matrix = np.array([[1.0, 2.0], [-3.0, 4.0], [0.5, -1.0]])
     point = np.array([2.0, -1.0])
@@ -276,7 +278,7 @@ def test_jacobian_handles_an_empty_function_output() -> None:
 
 
 def test_jacobian_handles_non_contiguous_array_inputs() -> None:
-    # The Jacobian should follow the values in the view, not the unused entries.
+    # The Jacobian should use only the values in the view, not the skipped 99.0 entries.
     point = np.array([1.0, 99.0, 2.0, 99.0])[::2]
 
     result = jacobian(lambda values: values**2, point)
@@ -313,3 +315,41 @@ def test_jacobian_rejects_nonpositive_or_nonfinite_steps(h: float) -> None:
 def test_jacobian_rejects_methods_it_does_not_support(method: str | None) -> None:
     with pytest.raises(ValueError, match="method must be 'central' or 'forward'"):
         jacobian(lambda values: values, [1.0], method=method)
+
+@pytest.mark.parametrize("x", [1e8, 1e15, 1e20, -1e20])
+@pytest.mark.parametrize("method", ["central", "forward"])
+def test_grad_step_survives_large_inputs(x: float, method: str) -> None:
+    # With a fixed step of 1e-5, x + h == x once |x| reaches about 1e11, so the
+    # derivative used to come out as exactly 0.
+    derivative = grad(lambda value: value**2, x, method=method)
+    assert derivative == pytest.approx(2 * x, rel=1e-6)
+
+
+def test_jacobian_step_survives_large_inputs() -> None:
+    result = jacobian(lambda values: values**2, [1e20, 1.0])
+    np.testing.assert_allclose(np.diag(result), [2e20, 2.0], rtol=1e-6)
+
+
+def test_grad_divides_by_the_representable_step() -> None:
+    # 1 + 1e-12 is not exactly representable, so dividing by the nominal step
+    # would bias the slope of a linear function.
+    assert grad(lambda value: 3.0 * value, 1.0, h=1e-12, method="forward") == pytest.approx(
+        3.0, rel=1e-12
+    )
+
+
+def test_grad_rejects_function_returning_non_finite_values() -> None:
+    with np.errstate(divide="ignore", invalid="ignore"):
+        with pytest.raises(ValueError, match="NaN or infinity"):
+            grad(lambda value: np.log(value), 0.0)
+
+
+def test_grad_requires_scalar_output_for_vector_input() -> None:
+    with pytest.raises(ValueError, match="use jacobian"):
+        grad(lambda values: values * 2, [1.0, 2.0])
+
+
+def test_finite_difference_rejects_a_step_that_overflows_at_the_input():
+    with np.errstate(over="ignore"):
+        with pytest.raises(ValueError, match="vanishes or overflows"):
+            grad(lambda value: value, 1e308, h=1e308)
