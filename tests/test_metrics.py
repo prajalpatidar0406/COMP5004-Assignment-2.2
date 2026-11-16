@@ -412,3 +412,42 @@ def test_shape_mismatch_messages_report_received_shapes() -> None:
         accuracy([0, 1, 1], [0, 1])
     with pytest.raises(ValueError, match=r"Received shapes \(1, 2\) and \(1, 2\)"):
         roc_curve([[0, 1]], [[0.1, 0.9]])
+
+
+def test_metric_validation_and_label_encoding_edge_cases() -> None:
+    with pytest.raises(ValueError, match="1D arrays"):
+        accuracy([[0]], [[0]])
+    with pytest.raises(ValueError, match="y_true must not contain"):
+        accuracy([np.nan], [0])
+    with pytest.raises(ValueError, match="y_pred must not contain"):
+        accuracy([0], [np.inf])
+    with pytest.raises(ValueError, match="y_true must not contain"):
+        roc_curve([np.nan, 1], [0.1, 0.9])
+    with pytest.raises(ValueError, match="y_score must not contain"):
+        roc_curve([0, 1], [0.1, np.inf])
+    with pytest.raises(TypeError, match="real numeric"):
+        mse(["a"], [1])
+    with pytest.raises(ValueError, match="NaN or infinity"):
+        mse([np.nan], [1])
+
+    for labels in ([[0, 1]], [], [0, 0]):
+        with pytest.raises(ValueError, match="labels"):
+            confusion_matrix([0], [0], labels=labels)
+
+    # A wide integer domain takes the sorted-search fallback instead of a lookup table.
+    wide_labels = np.array([0, 10**8], dtype=np.int64)
+    np.testing.assert_array_equal(
+        confusion_matrix([0, 10**8], [0, 10**8], labels=wide_labels),
+        np.eye(2, dtype=int),
+    )
+    with pytest.raises(ValueError, match="actual label"):
+        confusion_matrix([9], [0], labels=wide_labels)
+    with pytest.raises(ValueError, match="predicted label"):
+        confusion_matrix([0], [9], labels=[0, 1])
+
+
+def test_confusion_metrics_use_zero_division_for_empty_averages() -> None:
+    assert Precision(average="macro", zero_division=1).result() == 1
+    weighted = Precision(average="weighted", zero_division=1)
+    weighted._confusion = ConfusionMatrix(labels=[0, 1])
+    assert weighted.result() == 1

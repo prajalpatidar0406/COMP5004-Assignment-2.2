@@ -139,3 +139,57 @@ def test_toolkit_benchmark_rejects_tiny_sizes_and_empty_tables():
 def test_main_runs_toolkit_suite(capsys):
     main(["--size", "500", "--repeats", "1", "--warmup", "0", "--suite", "toolkit"])
     assert "Speed-up" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("X", "y", "kwargs", "message"),
+    [
+        (np.zeros((2, 1, 1)), [0, 1], {}, "1D or 2D"),
+        ([[0], [1]], [[0], [1]], {}, "y must be 1D"),
+        ([[0], [1]], [0], {}, "same number"),
+        (np.empty((0, 1)), [], {}, "must not be empty"),
+        ([[0]], [0], {"chunk_size": True}, "chunk_size"),
+        ([[0]], [0], {"buffer_sizes": [True]}, "positive integers"),
+        ([[0]], [0], {"buffer_sizes": [0]}, "positive integers"),
+    ],
+)
+def test_buffer_size_benchmark_rejects_invalid_shapes_and_sizes(X, y, kwargs, message):
+    buffer_sizes = kwargs.pop("buffer_sizes", [1])
+    kwargs.setdefault("chunk_size", 1)
+    with pytest.raises(ValueError, match=message):
+        benchmark_streaming_buffer_sizes(X, y, buffer_sizes, **kwargs)
+
+
+def test_reference_split_handles_empty_child_and_module_entry_point(capsys, monkeypatch):
+    import runpy
+    import sys
+
+    from numcompute_stream.benchmarking import _python_best_split
+
+    # NaN makes the candidate threshold NaN, leaving one child empty.
+    feature, threshold = _python_best_split([[np.nan], [1.0]], [0, 1])
+    assert feature == 0
+    assert np.isnan(threshold)
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["numcompute_stream.benchmarking", "--size", "20", "--repeats", "1", "--warmup", "0"],
+    )
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        runpy.run_module("numcompute_stream.benchmarking", run_name="__main__")
+    assert "Median speedup:" in capsys.readouterr().out
+
+
+def test_buffer_size_benchmark_accepts_one_dimensional_features():
+    result = benchmark_streaming_buffer_sizes(
+        np.array([0.0, 1.0, 2.0]),
+        np.array([0, 0, 1]),
+        [1],
+        chunk_size=1,
+        max_depth=1,
+    )
+    assert result[1]["accuracy"] is not None
