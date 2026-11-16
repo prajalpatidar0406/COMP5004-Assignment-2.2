@@ -509,3 +509,91 @@ def test_imputer_detects_missing_text_values_without_python_loops():
 def test_scaler_type_error_reports_received_dtype():
     with pytest.raises(TypeError, match="Received dtype <U1"):
         StandardScaler().fit(np.array(["a", "b"]))
+
+
+def test_transformer_empty_inputs_and_matrix_fit_modes():
+    with pytest.raises(ValueError, match="StandardScaler cannot fit"):
+        StandardScaler().fit(np.empty((0, 2)))
+    with pytest.raises(ValueError, match="MinMaxScaler cannot fit"):
+        MinMaxScaler().fit(np.empty((0, 2)))
+    with pytest.raises(ValueError, match="Imputer cannot fit"):
+        Imputer().fit(np.array([], dtype=float))
+    with pytest.raises(ValueError, match="OneHotEncoder requires"):
+        OneHotEncoder().fit(np.array([], dtype=int))
+
+    scaler = MinMaxScaler().fit([0.0, 1.0])
+    assert scaler.partial_fit(np.array([], dtype=float)) is scaler
+    imputer = Imputer().fit([1.0, np.nan])
+    assert imputer.partial_fit(np.array([], dtype=float)) is imputer
+    assert imputer.partial_fit(np.empty((0, 1))) is imputer
+
+    encoder = OneHotEncoder().fit([1, 2])
+    assert encoder.partial_fit(np.array([], dtype=int)) is encoder
+    assert encoder.transform(np.array([], dtype=int)).shape == (0, 2)
+
+
+def test_per_column_helpers_reject_invalid_widths_and_shapes():
+    from numcompute_stream.preprocessing import _ColumnwiseStep
+
+    step = _ColumnwiseStep(StandardScaler())
+    step.fit_transform(np.array([[1.0, 2.0], [3.0, 4.0]]))
+    with pytest.raises(ValueError, match="fewer than the 2"):
+        step.partial_fit_transform(np.array([[1.0]]))
+    with pytest.raises(ValueError, match="preserve the sample count"):
+        step._as_2d(np.ones((1, 2)), n_samples=2)
+
+    imputer = Imputer().fit([1.0, np.nan])
+    with pytest.raises(ValueError, match="fitted on 1D data"):
+        imputer.transform(np.array([[1.0], [2.0]]))
+
+    with pytest.raises(ValueError, match="2D array"):
+        ColumnSelector([0]).fit([1, 2])
+
+
+def test_per_column_transformer_cannot_shrink_output_width():
+    from numcompute_stream.preprocessing import _ColumnwiseStep
+
+    class ChangingWidth:
+        width = 2
+
+        def fit(self, X):
+            return self
+
+        def partial_fit(self, X):
+            self.width = 1
+            return self
+
+        def transform(self, X):
+            values = np.asarray(X).reshape(-1, 1)
+            return np.repeat(values, self.width, axis=1)
+
+    step = _ColumnwiseStep(ChangingWidth())
+    step.fit_transform(np.array([[1.0], [2.0]]))
+    with pytest.raises(ValueError, match="must not shrink"):
+        step.partial_fit_transform(np.array([[3.0]]))
+
+
+def test_imputer_zero_mean_and_numeric_fill_rejects_strings():
+    imputer = Imputer().fit([0.0, 0.0, np.nan])
+    assert imputer.statistics_ == 0.0
+    with pytest.raises(ValueError, match="non-numeric string data"):
+        Imputer(strategy="mean", fill_value=0).fit(np.array(["x", "y"], dtype=object))
+
+
+def test_columnwise_mixin_empty_matrix_and_abstract_summary_edges():
+    from numcompute_stream.preprocessing import _PerColumnMixin
+
+    with pytest.raises(ValueError, match="cannot fit on an empty array"):
+        Imputer().fit(np.empty((0, 1)))
+
+    class BareMixin(_PerColumnMixin):
+        pass
+
+    with pytest.raises(NotImplementedError):
+        BareMixin()._summarise_columns([])
+
+
+@pytest.mark.parametrize("epsilon", [-1.0, np.inf])
+def test_standard_scaler_rejects_invalid_epsilon(epsilon):
+    with pytest.raises(ValueError, match="epsilon"):
+        StandardScaler(epsilon=epsilon)

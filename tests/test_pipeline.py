@@ -359,3 +359,43 @@ def test_feature_union_updates_each_branch_incrementally():
     union.partial_fit([[1], [2]])
     union.partial_fit([[3]])
     assert first.calls == second.calls == 2
+
+
+def test_pipeline_rejects_empty_or_none_steps_and_uses_generic_transformers():
+    with pytest.raises(ValueError, match="at least one"):
+        Pipeline([])
+    with pytest.raises(ValueError, match="must not be None"):
+        Pipeline([("missing", None)])
+
+    class Offset:
+        def fit(self, X):
+            return self
+
+        def transform(self, X):
+            return np.asarray(X) + 1
+
+    transformed = Pipeline([("offset", Offset())]).fit_transform([[1.0], [2.0]])
+    np.testing.assert_array_equal(transformed, [[2.0], [3.0]])
+
+
+def test_final_estimator_helpers_use_partial_fit_and_report_missing_methods():
+    from numcompute_stream.pipeline import _fit_final_estimator, _update_final_estimator
+
+    class IncrementalOnly:
+        def partial_fit(self, X, y):
+            self.last = (X, y)
+
+    incremental = IncrementalOnly()
+    _fit_final_estimator(incremental, [[1]], [0])
+    assert incremental.last == ([[1]], [0])
+
+    class FitOnly:
+        def fit(self, X, y):
+            self.last = (X, y)
+
+    fallback = FitOnly()
+    _update_final_estimator(fallback, [[2]], [1])
+    assert fallback.last == ([[2]], [1])
+
+    with pytest.raises(TypeError, match="fit or partial_fit"):
+        _fit_final_estimator(object(), [[1]], [0])

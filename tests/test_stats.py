@@ -263,3 +263,97 @@ def test_histogram_stays_exact_on_random_streams(seed):
         histogram.update(chunk)
     expected, _ = np.histogram(np.concatenate(chunks), bins=histogram.edges)
     np.testing.assert_array_equal(histogram.counts, expected)
+
+
+@pytest.mark.parametrize(
+    ("function", "expected"),
+    [
+        (median, 2.0),
+        (std, 1.0),
+        (minimum, 1.0),
+        (maximum, 3.0),
+    ],
+)
+def test_nan_aware_reductions_ignore_missing_values(function, expected):
+    assert function([1.0, np.nan, 3.0], skipna=True) == pytest.approx(expected)
+
+
+def test_quantile_and_percentile_nan_and_range_edges():
+    assert quantile([1.0, np.nan, 3.0], 0.5, skipna=True) == 2.0
+    for function, values, message in (
+        (quantile, [np.inf], "finite"),
+        (quantile, [-0.1], "between 0 and 1"),
+        (percentile, [np.nan], "finite"),
+        (percentile, [101], "between 0 and 100"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            function([1.0, 2.0], values)
+
+
+@pytest.mark.parametrize(
+    ("values", "kwargs", "message"),
+    [
+        ([1.0, np.nan], {}, "Data contains NaN"),
+        ([np.nan], {"skipna": True}, "at least one valid"),
+        ([1.0], {"bins": 0}, "positive integer"),
+        ([1.0], {"bins": [0.0]}, "at least 2"),
+        ([1.0], {"bins": [[0.0, 1.0]]}, "1D array"),
+        ([1.0], {"bins": [0.0, np.inf]}, "finite and strictly increasing"),
+        ([1.0], {"bins": [0.0, 0.0]}, "strictly increasing"),
+    ],
+)
+def test_histogram_rejects_invalid_data_and_edges(values, kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        histogram(values, **kwargs)
+
+
+def test_histogram_accepts_numpy_and_named_bin_strategies():
+    counts, _ = histogram([0.0, 1.0, 2.0], bins=np.int64(2))
+    assert counts.sum() == 3
+    named_counts, _ = histogram([0.0, 1.0, 2.0], bins="auto")
+    assert named_counts.sum() == 3
+
+
+def test_streaming_histogram_empty_single_bin_and_fixed_outside_updates():
+    adaptive = StreamingHistogram(bins=1)
+    np.testing.assert_array_equal(adaptive.edges, [np.nan, np.nan])
+    assert adaptive.update([]) is adaptive
+    adaptive.update([2.0, 2.0]).update([4.0])
+    np.testing.assert_array_equal(adaptive.edges, [2.0, 4.0])
+    np.testing.assert_array_equal(adaptive.counts, [3])
+
+    fixed = StreamingHistogram(bins=2, range=(0.0, 1.0))
+    fixed.update([2.0])
+    assert fixed.n_out_of_range_ == 1
+    np.testing.assert_array_equal(fixed.counts, [0, 0])
+
+
+def test_streaming_histogram_rejects_range_overflow():
+    histogram = StreamingHistogram(bins=2)
+    histogram.update([0.0, 1.0])
+    with np.errstate(over="ignore"):
+        with pytest.raises(ValueError, match="range overflowed"):
+            histogram.update([np.finfo(float).max])
+    with pytest.raises(ValueError, match="values must be finite"):
+        histogram.update([np.nan])
+
+
+def test_streaming_stats_empty_malformed_and_all_missing_window():
+    stats = StreamingStats(window_size=3, skipna=True)
+    assert stats.update(np.empty((0, 2))) is stats
+    with pytest.raises(ValueError, match="1D or 2D"):
+        stats.update(np.zeros((1, 1, 1)))
+
+    stats.update(np.array([[np.nan, np.nan]]))
+    result = stats.result()
+    np.testing.assert_array_equal(result["histogram"], np.zeros((2, 10), dtype=int))
+    assert np.isnan(result["bin_edges"]).all()
+
+
+def test_streaming_stats_properties_and_representations():
+    stats = StreamingStats().update([1.0, 3.0])
+    assert stats.count == 2
+    assert stats.mean == 2.0
+    assert stats.variance == 1.0
+    assert "unbounded" in repr(stats)
+    assert "window_size=2" in repr(StreamingStats(window_size=2))
