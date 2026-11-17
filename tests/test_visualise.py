@@ -131,3 +131,81 @@ def test_plot_decision_tree_supports_multiclass_labels():
         "Predicts b",
         "Predicts c",
     ]
+
+
+def test_plotting_show_empty_series_and_unavailable_matplotlib(monkeypatch):
+    import numcompute_stream.visualise as visualise
+
+    shown = []
+    monkeypatch.setattr(plt, "show", lambda: shown.append(True))
+    plot_metric_over_time([0.5], "Accuracy", "score", show=True)
+    assert shown == [True]
+
+    _, axes = compare_models(
+        [np.nan, np.nan], [0.2, 0.4], ["missing", "reference"], show=False
+    )
+    assert len(axes.texts) == 1
+
+    monkeypatch.setattr(visualise, "plt", None)
+    with pytest.raises(ImportError, match="matplotlib is required"):
+        plot_metric_over_time([0.5], "Accuracy", "score", show=False)
+
+
+def test_prediction_plot_handles_fractional_labels_without_category_ticks(monkeypatch):
+    _, axes = plt.subplots()
+    set_yticks = axes.set_yticks
+    calls = []
+
+    def track_set_yticks(*args, **kwargs):
+        calls.append(args)
+        return set_yticks(*args, **kwargs)
+
+    monkeypatch.setattr(axes, "set_yticks", track_set_yticks)
+    plot_predictions_vs_ground_truth(
+        [0.1, 0.2], [0.2, 0.3], ax=axes, show=False
+    )
+    assert calls == []
+
+
+def test_decision_tree_plot_rejects_missing_root_names_and_children():
+    from numcompute_stream.tree import _Node
+    from types import SimpleNamespace
+
+    tree = DecisionTreeClassifier().fit([[0.0], [1.0]], [0, 1])
+    tree._root = None
+    with pytest.raises(ValueError, match="fitted"):
+        plot_decision_tree(tree, show=False)
+    with pytest.raises(ValueError, match="fitted"):
+        plot_decision_tree(SimpleNamespace(is_fitted=True, _root=None), show=False)
+
+    tree._root = _Node(np.array([1, 1]), feature=0)
+    with pytest.raises(ValueError, match="class_names"):
+        plot_decision_tree(tree, class_names=["", "one"], show=False)
+
+    with pytest.raises(RuntimeError, match="without two children"):
+        plot_decision_tree(tree, show=False)
+
+
+def test_decision_tree_plot_detects_children_disappearing_during_traversal():
+    from numcompute_stream.tree import _Node
+
+    leaf = _Node(np.array([1, 0]))
+
+    class ChangingNode:
+        def __init__(self):
+            self.left_reads = 0
+            self.right = leaf
+
+        @property
+        def is_leaf(self):
+            return False
+
+        @property
+        def left(self):
+            self.left_reads += 1
+            return leaf if self.left_reads <= 2 else None
+
+    tree = DecisionTreeClassifier().fit([[0.0], [1.0]], [0, 1])
+    tree._root = ChangingNode()
+    with pytest.raises(RuntimeError, match="without two children"):
+        plot_decision_tree(tree, show=False)

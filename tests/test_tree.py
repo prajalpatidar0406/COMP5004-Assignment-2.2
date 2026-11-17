@@ -237,3 +237,17 @@ def test_decision_tree_alias_matches_assignment_brief():
     tree = DecisionTree(max_depth=5, buffer_size=500)
     assert isinstance(tree, DecisionTreeClassifier)
     assert (tree.max_depth, tree.buffer_size) == (5, 500)
+
+
+def test_tree_accepts_one_dimensional_features_and_rejects_nonfinite_targets():
+    model = DecisionTreeClassifier().fit([0.0, 1.0, 2.0], [0, 0, 1])
+    assert model.n_features_in_ == 1
+    with pytest.raises(ValueError, match="y must not contain"):
+        DecisionTreeClassifier().fit([[0.0], [1.0]], [0.0, np.nan])
+
+
+def test_tree_feature_matrix_helper_accepts_vector_and_rejects_higher_dimensions():
+    matrix = DecisionTreeClassifier._as_feature_matrix([1.0, 2.0])
+    np.testing.assert_array_equal(matrix, [[1.0], [2.0]])
+    with pytest.raises(ValueError, match="1D or 2D"):
+        DecisionTreeClassifier._as_feature_matrix(np.zeros((1, 1, 1)))

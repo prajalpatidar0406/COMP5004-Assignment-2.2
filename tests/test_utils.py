@@ -120,3 +120,12 @@ def test_distances_reject_non_finite_input():
         euclidean_distance([np.nan], [0.0])
     with pytest.raises(ValueError, match="NaN or infinity"):
         cosine_similarity([np.inf], [1.0])
+
+
+def test_zero_distance_and_one_dimensional_supervised_chunk():
+    assert euclidean_distance([0.0, 0.0], [0.0, 0.0]) == 0.0
+    from numcompute_stream.utils import check_supervised_chunk
+
+    features, targets = check_supervised_chunk([1.0, 2.0], [0, 1])
+    np.testing.assert_array_equal(features, [[1.0], [2.0]])
+    np.testing.assert_array_equal(targets, [0, 1])

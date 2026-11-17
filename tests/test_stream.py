@@ -248,3 +248,98 @@ def test_rolling_metric_window_value_is_logged_as_cumulative(stream):
     assert trainer.logs[-1]["cumulative_recent"] == pytest.approx(expected)
     # The entry without the "cumulative_" prefix covers only the current chunk.
     assert trainer.logs[-1]["recent"] == pytest.approx(trainer.logs[-1]["accuracy"])
+
+
+def test_trainer_fallback_fit_pipeline_and_prediction_edges():
+    class FitOnlyModel:
+        def fit(self, X, y):
+            self.fitted = True
+            return self
+
+        def predict(self, X):
+            return np.zeros(len(X), dtype=int)
+
+    class FitOnlyPipeline:
+        def __init__(self):
+            self.fit_calls = 0
+
+        def fit(self, X):
+            self.fit_calls += 1
+
+        def transform(self, X):
+            return np.asarray(X)
+
+    model = FitOnlyModel()
+    pipeline = FitOnlyPipeline()
+    trainer = StreamTrainer(model, pipeline=pipeline, track_memory=False)
+    assert trainer.is_ready is False
+    trainer.fit_chunk([[0.0]], [0])
+    trainer.fit_chunk([[1.0]], [1])
+    assert trainer.is_ready is True
+    assert pipeline.fit_calls == 1
+
+    class PredictOnly:
+        def predict(self, X):
+            return np.zeros(len(X), dtype=int)
+
+    with pytest.raises(TypeError, match="partial_fit or fit"):
+        StreamTrainer(PredictOnly())
+
+    with pytest.raises(ValueError, match="matching 1D arrays"):
+        StreamTrainer(
+            type("WrongShape", (), {"fit": lambda self, X, y: None, "predict": lambda self, X: []})(),
+            track_memory=False,
+        ).score_chunk([[0.0]], [0])
+
+
+def test_score_metrics_require_probabilities_and_handle_unseen_class():
+    class NoProbabilityModel:
+        def fit(self, X, y):
+            return self
+
+        def predict(self, X):
+            return np.zeros(len(X), dtype=int)
+
+    trainer = StreamTrainer(NoProbabilityModel(), metrics={"auc": AUC()}, track_memory=False)
+    with pytest.raises(TypeError, match="predict_proba"):
+        trainer.score_chunk([[0.0], [1.0]], [0, 1])
+
+    class UnseenPositiveModel(NoProbabilityModel):
+        classes_ = np.array([0])
+
+        def predict_proba(self, X):
+            return np.ones((len(X), 1))
+
+    trainer = StreamTrainer(UnseenPositiveModel(), metrics={"auc": AUC()}, track_memory=False)
+    trainer.score_chunk([[0.0], [1.0]], [0, 1])
+    assert trainer.logs[-1]["auc"] == pytest.approx(0.5)
+
+
+def test_stream_log_chunk_starts_a_record_and_sizeof_skips_unset_slots():
+    trainer = StreamTrainer(DecisionTreeClassifier(), track_memory=False)
+    record = trainer.log_chunk("custom", 2.5)
+    assert record == {"chunk": 0, "custom": 2.5}
+    with pytest.raises(ValueError, match="must not be empty"):
+        trainer.log_chunk("", 1.0)
+
+    class PartiallyInitialized:
+        __slots__ = ("present", "missing")
+
+        def __init__(self):
+            self.present = {"nested": 1}
+
+    assert deep_sizeof(PartiallyInitialized()) > 0
+
+
+def test_trainer_logs_nan_when_metric_result_is_undefined():
+    class UndefinedAccuracy(Accuracy):
+        def result(self):
+            raise ValueError("not defined yet")
+
+    model = DecisionTreeClassifier().fit([[0.0], [1.0]], [0, 1])
+    trainer = StreamTrainer(
+        model, metrics={"undefined": UndefinedAccuracy()}, track_memory=False
+    )
+    trainer.score_chunk([[0.0]], [0])
+    assert np.isnan(trainer.logs[-1]["undefined"])
+    assert np.isnan(trainer.logs[-1]["cumulative_undefined"])
